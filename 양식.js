@@ -210,7 +210,7 @@ function _요약카드(body, 항목들) {
 
 /** 기간 내 해당 설비의 이상 목록(심각도 → 최근일 순) */
 function _이상상세(시작, 종료, 태그) {
-  const v = _시트(SH.점검).getDataRange().getValues();
+  const v = _점검값().slice();
   const h = v.shift().map(String);
   const i = (k) => h.indexOf(k);
   const 값 = (r, k) => (i(k) < 0 || r[i(k)] === null ? '' : String(r[i(k)]).trim());
@@ -248,7 +248,7 @@ function _이상상세(시작, 종료, 태그) {
 
 /** 설비 1대의 기간 내 통계 */
 function _설비통계(태그, 시작, 종료) {
-  const v = _시트(SH.점검).getDataRange().getValues();
+  const v = _점검값().slice();
   const h = v.shift().map(String);
   const i = (k) => h.indexOf(k);
   const 값 = (r, k) => (i(k) < 0 || r[i(k)] === null ? '' : String(r[i(k)]).trim());

@@ -60,6 +60,7 @@ function _로그(...args) {
 
 function 로그비우기() {
   로그모음.length = 0;
+  _캐시비우기();
 }
 
 function 로그전체() {
@@ -106,10 +107,38 @@ function _행객체(h, r) {
   return o;
 }
 
+/**
+ * 설정·점검기록은 한 번 실행 안에서 여러 번 읽는다.
+ * 그냥 읽을 때마다 시트를 다시 부르면 호출이 수만 번이 되어 6분 제한에 걸린다
+ * (수식 15,120개를 만들면서 설정을 행마다 읽던 것이 실제로 그랬다).
+ * 한 실행 안에서만 쓰는 메모리 캐시를 두고, 값을 쓰면 그 키만 갱신한다.
+ */
+const _설정캐시 = {};
+let _점검값캐시 = null;
+
+function _캐시비우기() {
+  Object.keys(_설정캐시).forEach((k) => delete _설정캐시[k]);
+  _점검값캐시 = null;
+}
+
+function _점검캐시비우기() {
+  _점검값캐시 = null;
+}
+
+/** 점검기록 전체 값(헤더 포함). 부르는 쪽에서 slice() 해서 쓴다 */
+function _점검값() {
+  if (!_점검값캐시) _점검값캐시 = _시트(SH.점검).getDataRange().getValues();
+  return _점검값캐시;
+}
+
 function 설정(key) {
+  if (key in _설정캐시) return _설정캐시[key];
   const v = _시트(SH.설정).getDataRange().getValues();
   for (let i = 1; i < v.length; i++) {
-    if (String(v[i][0]).trim() === key) return v[i][1];
+    if (String(v[i][0]).trim() === key) {
+      _설정캐시[key] = v[i][1];
+      return v[i][1];
+    }
   }
   throw new Error('설정 탭에 없는 키: ' + key);
 }
@@ -120,10 +149,12 @@ function _설정쓰기(key, 값) {
   for (let i = 1; i < v.length; i++) {
     if (String(v[i][0]).trim() === key) {
       sh.getRange(i + 1, 2).setValue(값);
+      _설정캐시[key] = 값;
       return;
     }
   }
   sh.appendRow([key, 값, '']);
+  _설정캐시[key] = 값;
 }
 
 function _날짜(d) {
@@ -201,14 +232,20 @@ function _조회수식(찾을셀, 반환열문자, 범위) {
   return '=IFERROR(XLOOKUP(' + 찾을셀 + ',' + SH.설비 + '!' + r.태그 + ',' + SH.설비 + '!' + r.열(반환열문자) + '),"미등록")';
 }
 
-/** 데이터 검증(드롭다운) 한 열 */
-function _검증목록(sh, 머리행, 열이름, 값들, 범위여부) {
+/**
+ * 데이터 검증(드롭다운) 한 열.
+ * requireValueInRange 는 같은 스프레드시트 안에서만 허용된다 —
+ * 내보낸 점검대장은 임시 사본(다른 파일)이라 범위 참조를 쓰면 거기서 죽는다.
+ * 값 목록(문자열 배열)으로 넣으면 어느 시트에서나 동작한다.
+ */
+function _검증목록(sh, 머리행, 열이름, 값들) {
   const h = _헤더행(sh, 머리행);
   const i = h.indexOf(열이름);
   if (i < 0) return false;
-  const b = SpreadsheetApp.newDataValidation();
-  const 규칙 = 범위여부 ? b.requireValueInRange(값들, true) : b.requireValueInList(값들, true);
-  const 검증 = 규칙.setAllowInvalid(false).setHelpText(열이름 + ' 목록에서 고르세요').build();
+  const 목록 = 값들.map(String).filter((v) => v.trim() !== '');
+  if (!목록.length) return false;
+  const 검증 = SpreadsheetApp.newDataValidation().requireValueInList(목록, true)
+    .setAllowInvalid(false).setHelpText(열이름 + ' 목록에서 고르세요').build();
   const 데이터수 = sh.getLastRow() - 머리행;
   if (데이터수 > 0) sh.getRange(머리행 + 1, i + 1, 데이터수, 1).setDataValidation(검증);
   return true;
@@ -244,10 +281,10 @@ function 대장서식적용(sh, 시작행) {
   });
 
   // 2) 데이터 검증 4열
-  const 설비시트 = _시트(SH.설비);
-  const 설비범위 = 설비시트.getRange(2, 1, Math.max(설비시트.getLastRow() - 1, 1), 1);
+  const 설비태그들 = _시트(SH.설비).getDataRange().getValues().slice(1)
+    .map((r) => String(r[0]).trim()).filter((v) => v);
   let 검증수 = 0;
-  if (_검증목록(sh, 머리, '설비태그', 설비범위, true)) 검증수++;
+  if (_검증목록(sh, 머리, '설비태그', 설비태그들)) 검증수++;
   if (_검증목록(sh, 머리, '판정', ['정상', '이상'])) 검증수++;
   if (_검증목록(sh, 머리, '심각도', ['상', '중', '하'])) 검증수++;
   if (_검증목록(sh, 머리, '조치상태', ['미조치', '진행중', '완료'])) 검증수++;
@@ -424,8 +461,7 @@ function _표지시트(ss, 기간시작, 기간종료) {
 
 /** 판정=이상 행만 값으로 복사(수식 없음 → 어떤 엑셀에서도 열림) */
 function _이상목록시트(ss) {
-  const 원본 = _시트(SH.점검);
-  const v = 원본.getDataRange().getValues();
+  const v = _점검값().slice();
   const h = v.shift().map(String);
   const L = h.indexOf('판정');
   const 이상 = v.filter((r) => String(r[L]).trim() === '이상');
@@ -478,9 +514,8 @@ function 대장내보내기() {
     });
 
     // 점검대장: 1~3행 제목 블록, 5행 머리글, 6행부터 데이터
-    const 원본 = _시트(SH.점검);
-    const h = _헤더(원본);
-    const 값 = 원본.getDataRange().getValues();
+    const h = _헤더(_시트(SH.점검));
+    const 값 = _점검값().slice();
     값.shift();
     데이터수 = 값.length;
     const 대장 = 임시.insertSheet('점검대장', 0);
@@ -809,7 +844,7 @@ function _요약카드(body, 항목들) {
 
 /** 기간 내 해당 설비의 이상 목록(심각도 → 최근일 순) */
 function _이상상세(시작, 종료, 태그) {
-  const v = _시트(SH.점검).getDataRange().getValues();
+  const v = _점검값().slice();
   const h = v.shift().map(String);
   const i = (k) => h.indexOf(k);
   const 값 = (r, k) => (i(k) < 0 || r[i(k)] === null ? '' : String(r[i(k)]).trim());
@@ -847,7 +882,7 @@ function _이상상세(시작, 종료, 태그) {
 
 /** 설비 1대의 기간 내 통계 */
 function _설비통계(태그, 시작, 종료) {
-  const v = _시트(SH.점검).getDataRange().getValues();
+  const v = _점검값().slice();
   const h = v.shift().map(String);
   const i = (k) => h.indexOf(k);
   const 값 = (r, k) => (i(k) < 0 || r[i(k)] === null ? '' : String(r[i(k)]).trim());
@@ -1455,10 +1490,12 @@ function _설정쓰기_시트(ss, key, 값) {
   for (let i = 1; i < v.length; i++) {
     if (String(v[i][0]).trim() === key) {
       sh.getRange(i + 1, 2).setValue(값);
+      _설정캐시[key] = 값;
       return;
     }
   }
   sh.appendRow([key, 값, '']);
+  _설정캐시[key] = 값;
 }
 
 function _서식헤더(sh, 열수) {
@@ -1694,6 +1731,7 @@ function 설치_샘플데이터() {
     });
   });
   점검탭.getRange(2, 1, 행들.length, 행들[0].length).setValues(행들);
+  _점검캐시비우기(); // 방금 쓴 데이터를 다시 읽도록
   // 집계기간을 실제 생성한 날짜로 확정한다(문서·대장의 기간과 데이터가 어긋나지 않게)
   _설정쓰기_시트(ss, '대장기간_시작', 날짜들[0]);
   _설정쓰기_시트(ss, '대장기간_종료', 날짜들[날짜들.length - 1]);
@@ -1733,37 +1771,130 @@ function 설치_샘플데이터() {
 
 /* ============================ 설치 확인 ============================ */
 
+/**
+ * 항목별 자체 진단. 무엇이 잘못됐는지 한 줄씩 ○/× 로 보여준다 —
+ * 사용자가 로그를 그대로 붙여주면 원인을 바로 찾을 수 있다.
+ */
 function 설치_확인() {
   로그비우기();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  _로그('=== 설치 상태 ===');
-  탭정의().forEach((t) => {
-    const sh = ss.getSheetByName(t.이름);
-    _로그((sh ? '  ○ ' : '  × ') + t.이름 + (sh ? ' : ' + Math.max(sh.getLastRow() - 1, 0) + '행' : ' (없음)'));
+  let 통과 = 0;
+  let 문제 = 0;
+
+  const 검사 = (이름, fn) => {
+    let 결과;
+    try {
+      결과 = fn();
+    } catch (e) {
+      결과 = e.message;
+    }
+    if (결과 === true || 결과 === undefined || 결과 === null) {
+      통과++;
+      _로그('  ○ ' + 이름);
+    } else {
+      문제++;
+      _로그('  × ' + 이름 + ' — ' + 결과);
+    }
+  };
+
+  _로그('=== 진단: ' + ss.getName() + ' ===');
+
+  검사('탭 9개', () => {
+    const 빠진것 = 탭정의().map((t) => t.이름).filter((n) => !ss.getSheetByName(n));
+    return 빠진것.length ? '없음: ' + 빠진것.join(', ') : true;
   });
-  const 피벗 = ss.getSheetByName(SH.피벗);
-  _로그((피벗 ? '  ○ ' : '  - ') + '피벗: ' + (피벗 ? '있음' : '없음(선택 단계)'));
-  _로그('설정 키 ' + Object.keys(_설정읽기(ss)).length + '개');
-  [['출력폴더ID', '출력 폴더'], ['구글독스폴더ID', '구글독스 폴더']].forEach(([k, 이름]) => {
-    const id = String(_설정안전(k, ''));
-    let 상태 = '없음';
-    if (id) 상태 = _안전(이름, () => DriveApp.getFolderById(id).getName()) || '접근 실패';
-    _로그('  · ' + 이름 + ': ' + 상태);
+
+  검사('탭 헤더', () => {
+    const 틀린것 = [];
+    탭정의().forEach((t) => {
+      if (t.이름 === SH.안내) return;
+      const sh = ss.getSheetByName(t.이름);
+      if (!sh) return;
+      const 현재 = _헤더행(sh, 1);
+      if (t.헤더.some((hd, i) => String(현재[i] || '').trim() !== hd)) 틀린것.push(t.이름);
+    });
+    return 틀린것.length ? '헤더 다름: ' + 틀린것.join(', ') : true;
   });
-  const 점검 = ss.getSheetByName(SH.점검);
-  if (점검 && 점검.getLastRow() > 1) {
-    const 수식 = 점검.getRange(2, 4, 1, 3).getFormulas()[0].filter((x) => x).length;
-    _로그('점검기록 수식(2행 D:F): ' + 수식 + '/3');
-  }
-  ['작업계획서', '점검결과보고서'].forEach((종류) => {
-    const 완료 = _발행이력완료행(종류).length;
-    _로그('발행이력 ' + 종류 + ': 완료 ' + 완료 + '건');
+
+  검사('설비마스터 20행', () => {
+    const sh = ss.getSheetByName(SH.설비);
+    const 행 = sh ? sh.getLastRow() - 1 : 0;
+    return 행 === 20 ? true : 행 + '행 (20행이어야 함)';
   });
-  const 측정 = ss.getSheetByName(SH.측정);
-  if (측정 && 측정.getLastRow() > 1) {
-    _로그('측정로그 ' + (측정.getLastRow() - 1) + '행');
-    측정.getDataRange().getValues().slice(-5).forEach((r) => _로그('  · ' + r[1] + ' / ' + r[2] + ' / ' + r[3] + '건 / ' + r[4] + '초 / ' + r[6]));
-  }
+
+  검사('점검기록 5,040행', () => {
+    const sh = ss.getSheetByName(SH.점검);
+    const 행 = sh ? sh.getLastRow() - 1 : 0;
+    return 행 === 5040 ? true : 행 + '행 (5,040행이어야 함)';
+  });
+
+  검사('점검기록 조회 수식 3열', () => {
+    const sh = ss.getSheetByName(SH.점검);
+    if (!sh || sh.getLastRow() < 2) return '점검기록이 비어 있음';
+    const 수 = sh.getRange(2, 4, 1, 3).getFormulas()[0].filter((x) => x).length;
+    return 수 === 3 ? true : 'D:F 수식 ' + 수 + '/3 (설치_샘플데이터를 다시 실행하세요)';
+  });
+
+  검사('점검기록 드롭다운 4열', () => {
+    const sh = ss.getSheetByName(SH.점검);
+    if (!sh || sh.getLastRow() < 2) return '점검기록이 비어 있음';
+    const h = _헤더(sh);
+    const 있음 = ['설비태그', '판정', '심각도', '조치상태'].filter((n) => {
+      const c = h.indexOf(n);
+      return c >= 0 && sh.getRange(2, c + 1).getDataValidation() !== null;
+    });
+    return 있음.length === 4 ? true : 있음.length + '/4열만 있음';
+  });
+
+  검사('요약 수식 결과', () => {
+    const sh = ss.getSheetByName(SH.요약설비);
+    if (!sh || sh.getLastRow() < 2) return '요약_설비별이 비어 있음';
+    const 값 = sh.getRange(2, 13, Math.min(sh.getLastRow() - 1, 20), 3).getDisplayValues();
+    const 오류 = 값.filter((r) => r.some((x) => String(x).charAt(0) === '#')).length;
+    return 오류 ? 오류 + '행에 수식 오류(#REF! 등)' : true;
+  });
+
+  검사('설정 키 16개', () => {
+    const 값 = _설정읽기(ss);
+    const 빠진것 = 설정기본값().map(([k]) => k).filter((k) => !(k in 값));
+    return 빠진것.length ? '없는 키: ' + 빠진것.join(', ') : true;
+  });
+
+  검사('드라이브 폴더', () => {
+    const ids = ['출력폴더ID', '구글독스폴더ID'].map((k) => String(_설정안전(k, '')));
+    const 없는것 = ids.filter((id) => !id);
+    if (없는것.length) return '설정에 폴더 ID가 없음 → 설치_전체를 실행하세요';
+    const 실패 = ids.filter((id) => !_안전('폴더 확인', () => DriveApp.getFolderById(id).getName()));
+    return 실패.length ? '접근 실패: ' + 실패.join(', ') : true;
+  });
+
+  검사('작업계획 20행', () => {
+    const sh = ss.getSheetByName(SH.계획);
+    const 행 = sh ? sh.getLastRow() - 1 : 0;
+    return 행 === 20 ? true : 행 + '행 (20행이어야 함)';
+  });
+
+  검사('발행이력', () => {
+    const 전체 = Math.max(_시트(SH.발행).getLastRow() - 1, 0);
+    if (!전체) {
+      _로그('      · 아직 문서를 만들지 않았습니다(정상)');
+      return true;
+    }
+    const 완료 = _발행이력완료행('작업계획서').length + _발행이력완료행('점검결과보고서').length;
+    _로그('      · 완료 ' + 완료 + ' / 전체 ' + 전체 + '건');
+    return 완료 ? true : '완료 건이 없습니다 — 양식_일괄생성을 실행하세요';
+  });
+
+  검사('최근 측정로그', () => {
+    const sh = ss.getSheetByName(SH.측정);
+    if (!sh || sh.getLastRow() < 2) return true;
+    const 최근 = sh.getDataRange().getValues().slice(-3);
+    최근.forEach((r) => _로그('      · ' + r[1] + ' / ' + r[2] + ' / ' + r[3] + '건 / ' + r[4] + '초'));
+    return true;
+  });
+
+  _로그('=== 결과: 정상 ' + 통과 + ' / 문제 ' + 문제 + ' ===');
+  if (문제) _로그('※ × 항목을 그대로 복사해서 보내주시면 원인을 잡습니다.');
   return 로그전체();
 }
 
@@ -1783,7 +1914,15 @@ function 측정_수작업종료(건수) {
   const 시작 = Number(p.getProperty('측정_시작') || 0);
   if (!시작) throw new Error('측정_수작업시작을 먼저 실행하세요.');
   const 초 = (Date.now() - 시작) / 1000;
-  const n = Number(건수) || 1;
+  let n = Number(건수);
+  if (!n) {
+    // 편집기 실행은 인수를 못 넣으므로 물어본다(대화상자가 안 되면 1건으로 기록)
+    n = 1;
+    try {
+      const 답 = SpreadsheetApp.getUi().prompt('수작업 측정', '직접 만든 문서가 몇 건인가요?', SpreadsheetApp.getUi().ButtonSet.OK_CANCEL);
+      if (답.getSelectedButton() === SpreadsheetApp.getUi().Button.OK) n = Number(답.getResponseText()) || 1;
+    } catch (e) {}
+  }
   _측정로그('수작업', '문서 작성', n, 초, '수작업', '엑셀/한글 수작업 기준');
   p.deleteProperty('측정_시작');
   _로그('수작업 ' + n + '건 / ' + 초.toFixed(1) + '초 / 건당 ' + (초 / n).toFixed(1) + '초');
@@ -1829,6 +1968,18 @@ function onOpen() {
     .addToUi();
 }
 
+/** 메뉴 실행 공통. 오류가 나면 이유를 대화상자로 보여준다(원시 예외 문구만 던지지 않는다) */
+function _메뉴실행(제목, 일) {
+  로그비우기();
+  try {
+    const 본문 = 일();
+    _알림(제목 + ' 완료', 본문 || _마지막줄(8));
+  } catch (e) {
+    _로그('[오류] ' + e.message);
+    _알림(제목 + ' 오류', e.message + '\n\n' + _마지막줄(6));
+  }
+}
+
 function _알림(제목, 본문) {
   const 글 = String(본문 === null || 본문 === undefined ? '' : 본문);
   try {
@@ -1845,8 +1996,10 @@ function _마지막줄(n) {
 }
 
 function 메뉴_설치전체() {
-  설치_전체();
-  _알림('설치 완료', _마지막줄(8));
+  _메뉴실행('설치', () => {
+    설치_전체();
+    return _마지막줄(8);
+  });
 }
 
 function 메뉴_샘플데이터() {
@@ -1858,46 +2011,54 @@ function 메뉴_샘플데이터() {
   // V8 에서 alert(title, message, buttonSet) 은 'YES'/'NO' 문자열을 돌려준다
   const 답글 = String(답).toUpperCase();
   if (답글.indexOf('YES') < 0 && 답글.indexOf('예') < 0) return;
-  설치_샘플데이터();
-  _알림('샘플 데이터 완료', _마지막줄(8));
+  _메뉴실행('샘플 데이터', () => {
+    설치_샘플데이터();
+    return _마지막줄(8);
+  });
 }
 
 function 메뉴_대장내보내기() {
-  const url = 대장내보내기();
-  _알림('점검대장 내보내기', _마지막줄(3) + '\n\n' + url);
+  _메뉴실행('점검대장 내보내기', () => {
+    const url = 대장내보내기();
+    return _마지막줄(3) + '\n\n' + url;
+  });
 }
 
 function 메뉴_요약갱신() {
-  로그비우기();
-  요약갱신();
-  _알림('요약 다시 계산', _마지막줄(3));
+  _메뉴실행('요약 다시 계산', () => {
+    요약갱신();
+    return _마지막줄(3);
+  });
 }
 
 function 메뉴_작업계획서() {
-  로그비우기();
-  양식_일괄생성('작업계획서');
-  _알림('작업계획서 생성', _마지막줄(5));
+  _메뉴실행('작업계획서 생성', () => {
+    양식_일괄생성('작업계획서');
+    return _마지막줄(5);
+  });
 }
 
 function 메뉴_결과보고서() {
-  로그비우기();
-  양식_일괄생성('점검결과보고서');
-  _알림('점검결과보고서 생성', _마지막줄(5));
+  _메뉴실행('점검결과보고서 생성', () => {
+    양식_일괄생성('점검결과보고서');
+    return _마지막줄(5);
+  });
 }
 
 function 메뉴_합본() {
-  로그비우기();
-  const pdf = 합본PDF('점검결과보고서');
-  _알림('합본 PDF', _마지막줄(2) + '\n\n' + pdf);
+  _메뉴실행('합본 PDF', () => {
+    const pdf = 합본PDF('점검결과보고서');
+    return _마지막줄(2) + '\n\n' + pdf;
+  });
 }
 
 function 메뉴_검증() {
-  로그비우기();
-  검증_문서대조('점검결과보고서');
-  _알림('발행 문서 검증', _마지막줄(6));
+  _메뉴실행('발행 문서 검증', () => {
+    검증_문서대조('점검결과보고서');
+    return _마지막줄(6);
+  });
 }
 
 function 메뉴_설치확인() {
-  설치_확인();
-  _알림('설치 상태', 로그전체());
+  _메뉴실행('진단', () => 설치_확인());
 }

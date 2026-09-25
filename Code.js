@@ -48,6 +48,7 @@ function _로그(...args) {
 
 function 로그비우기() {
   로그모음.length = 0;
+  _캐시비우기();
 }
 
 function 로그전체() {
@@ -94,10 +95,38 @@ function _행객체(h, r) {
   return o;
 }
 
+/**
+ * 설정·점검기록은 한 번 실행 안에서 여러 번 읽는다.
+ * 그냥 읽을 때마다 시트를 다시 부르면 호출이 수만 번이 되어 6분 제한에 걸린다
+ * (수식 15,120개를 만들면서 설정을 행마다 읽던 것이 실제로 그랬다).
+ * 한 실행 안에서만 쓰는 메모리 캐시를 두고, 값을 쓰면 그 키만 갱신한다.
+ */
+const _설정캐시 = {};
+let _점검값캐시 = null;
+
+function _캐시비우기() {
+  Object.keys(_설정캐시).forEach((k) => delete _설정캐시[k]);
+  _점검값캐시 = null;
+}
+
+function _점검캐시비우기() {
+  _점검값캐시 = null;
+}
+
+/** 점검기록 전체 값(헤더 포함). 부르는 쪽에서 slice() 해서 쓴다 */
+function _점검값() {
+  if (!_점검값캐시) _점검값캐시 = _시트(SH.점검).getDataRange().getValues();
+  return _점검값캐시;
+}
+
 function 설정(key) {
+  if (key in _설정캐시) return _설정캐시[key];
   const v = _시트(SH.설정).getDataRange().getValues();
   for (let i = 1; i < v.length; i++) {
-    if (String(v[i][0]).trim() === key) return v[i][1];
+    if (String(v[i][0]).trim() === key) {
+      _설정캐시[key] = v[i][1];
+      return v[i][1];
+    }
   }
   throw new Error('설정 탭에 없는 키: ' + key);
 }
@@ -108,10 +137,12 @@ function _설정쓰기(key, 값) {
   for (let i = 1; i < v.length; i++) {
     if (String(v[i][0]).trim() === key) {
       sh.getRange(i + 1, 2).setValue(값);
+      _설정캐시[key] = 값;
       return;
     }
   }
   sh.appendRow([key, 값, '']);
+  _설정캐시[key] = 값;
 }
 
 function _날짜(d) {
@@ -189,14 +220,20 @@ function _조회수식(찾을셀, 반환열문자, 범위) {
   return '=IFERROR(XLOOKUP(' + 찾을셀 + ',' + SH.설비 + '!' + r.태그 + ',' + SH.설비 + '!' + r.열(반환열문자) + '),"미등록")';
 }
 
-/** 데이터 검증(드롭다운) 한 열 */
-function _검증목록(sh, 머리행, 열이름, 값들, 범위여부) {
+/**
+ * 데이터 검증(드롭다운) 한 열.
+ * requireValueInRange 는 같은 스프레드시트 안에서만 허용된다 —
+ * 내보낸 점검대장은 임시 사본(다른 파일)이라 범위 참조를 쓰면 거기서 죽는다.
+ * 값 목록(문자열 배열)으로 넣으면 어느 시트에서나 동작한다.
+ */
+function _검증목록(sh, 머리행, 열이름, 값들) {
   const h = _헤더행(sh, 머리행);
   const i = h.indexOf(열이름);
   if (i < 0) return false;
-  const b = SpreadsheetApp.newDataValidation();
-  const 규칙 = 범위여부 ? b.requireValueInRange(값들, true) : b.requireValueInList(값들, true);
-  const 검증 = 규칙.setAllowInvalid(false).setHelpText(열이름 + ' 목록에서 고르세요').build();
+  const 목록 = 값들.map(String).filter((v) => v.trim() !== '');
+  if (!목록.length) return false;
+  const 검증 = SpreadsheetApp.newDataValidation().requireValueInList(목록, true)
+    .setAllowInvalid(false).setHelpText(열이름 + ' 목록에서 고르세요').build();
   const 데이터수 = sh.getLastRow() - 머리행;
   if (데이터수 > 0) sh.getRange(머리행 + 1, i + 1, 데이터수, 1).setDataValidation(검증);
   return true;
@@ -232,10 +269,10 @@ function 대장서식적용(sh, 시작행) {
   });
 
   // 2) 데이터 검증 4열
-  const 설비시트 = _시트(SH.설비);
-  const 설비범위 = 설비시트.getRange(2, 1, Math.max(설비시트.getLastRow() - 1, 1), 1);
+  const 설비태그들 = _시트(SH.설비).getDataRange().getValues().slice(1)
+    .map((r) => String(r[0]).trim()).filter((v) => v);
   let 검증수 = 0;
-  if (_검증목록(sh, 머리, '설비태그', 설비범위, true)) 검증수++;
+  if (_검증목록(sh, 머리, '설비태그', 설비태그들)) 검증수++;
   if (_검증목록(sh, 머리, '판정', ['정상', '이상'])) 검증수++;
   if (_검증목록(sh, 머리, '심각도', ['상', '중', '하'])) 검증수++;
   if (_검증목록(sh, 머리, '조치상태', ['미조치', '진행중', '완료'])) 검증수++;
@@ -412,8 +449,7 @@ function _표지시트(ss, 기간시작, 기간종료) {
 
 /** 판정=이상 행만 값으로 복사(수식 없음 → 어떤 엑셀에서도 열림) */
 function _이상목록시트(ss) {
-  const 원본 = _시트(SH.점검);
-  const v = 원본.getDataRange().getValues();
+  const v = _점검값().slice();
   const h = v.shift().map(String);
   const L = h.indexOf('판정');
   const 이상 = v.filter((r) => String(r[L]).trim() === '이상');
@@ -466,9 +502,8 @@ function 대장내보내기() {
     });
 
     // 점검대장: 1~3행 제목 블록, 5행 머리글, 6행부터 데이터
-    const 원본 = _시트(SH.점검);
-    const h = _헤더(원본);
-    const 값 = 원본.getDataRange().getValues();
+    const h = _헤더(_시트(SH.점검));
+    const 값 = _점검값().slice();
     값.shift();
     데이터수 = 값.length;
     const 대장 = 임시.insertSheet('점검대장', 0);
