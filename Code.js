@@ -66,7 +66,7 @@ function _안전(이름, fn) {
 
 function _시트(name) {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
-  if (!sh) throw new Error('탭을 찾을 수 없습니다: ' + name);
+  if (!sh) throw new Error('탭이 없습니다: ' + name + ' — 편집기에서 설치_전체를 먼저 실행하세요.');
   return sh;
 }
 

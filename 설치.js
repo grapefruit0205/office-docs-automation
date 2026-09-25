@@ -339,6 +339,13 @@ function 설치_샘플데이터() {
   로그비우기();
   const 시작 = Date.now();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // 설치를 건너뛰고 실행해도 "탭이 없습니다" 로 죽지 않게 먼저 확인한다
+  if (!ss.getSheetByName(SH.설비) || !ss.getSheetByName(SH.점검) || !ss.getSheetByName(SH.설정)) {
+    _로그('[알림] 탭이 아직 없어 설치_전체를 먼저 실행합니다');
+    설치_전체();
+  }
+
   const r = _난수기계(20260925);
 
   // 1) 설비마스터
