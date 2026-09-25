@@ -1961,6 +1961,43 @@ function 설치_확인() {
   return 로그전체();
 }
 
+/**
+ * 발행이력 점검 — 종류별 건수와 중복(문서종류+대상ID)을 본다.
+ * "대조 21부" 처럼 예상(20부)과 다른 숫자가 나올 때 원인을 찾는 용도.
+ */
+function 진단_발행이력() {
+  로그비우기();
+  const v = _시트(SH.발행).getDataRange().getValues();
+  const h = v.shift().map(String);
+  const i종 = h.indexOf('문서종류');
+  const iID = h.indexOf('대상ID');
+  const i상 = h.indexOf('상태');
+  const 종류별 = {};
+  const 본것 = {};
+  const 중복 = [];
+  let 기록 = 0;
+
+  v.forEach((r, i) => {
+    const 종 = String(r[i종]).trim();
+    const id = String(r[iID]).trim();
+    if (!종 && !id) return;
+    기록++;
+    종류별[종] = (종류별[종] || 0) + 1;
+    const k = 종 + ' + ' + id;
+    if (k in 본것) 중복.push('행 ' + (i + 2) + ' : ' + k + ' (앞선 행 ' + 본것[k] + ')');
+    else 본것[k] = i + 2;
+  });
+
+  _로그('발행이력: 시트 ' + v.length + '행 / 실제 기록 ' + 기록 + '건');
+  Object.keys(종류별).forEach((k) => {
+    const 완료 = v.filter((r) => String(r[i종]).trim() === k && String(r[i상]).trim() === '완료').length;
+    _로그('  · ' + k + ': ' + 종류별[k] + '건 (완료 ' + 완료 + ')');
+  });
+  if (중복.length) 중복.forEach((m) => _로그('  × 중복 ' + m));
+  else _로그('  · 중복 없음');
+  return 로그전체();
+}
+
 /* ============================ 수작업 측정 ============================ */
 
 function 측정_수작업시작() {
