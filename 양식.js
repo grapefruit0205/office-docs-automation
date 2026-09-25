@@ -313,25 +313,27 @@ function _종합의견(t) {
 
 /* ============================ 대상 조회 ============================ */
 
+/** 작업계획 탭 값(헤더 포함). 문서 20부를 만들 때 매번 다시 읽지 않도록 담아 둔다 */
+let _계획값캐시 = null;
+
+function _계획값() {
+  if (!_계획값캐시) _계획값캐시 = _재시도('작업계획 읽기', () => _시트(SH.계획).getDataRange().getValues());
+  return _계획값캐시;
+}
+
 function _대상목록(종류) {
-  if (종류 === '작업계획서') {
-    return _시트(SH.계획).getDataRange().getValues().slice(1)
-      .filter((r) => String(r[0]).trim())
-      .map((r) => ({ ID: String(r[0]).trim() }));
-  }
-  return _시트(SH.설비).getDataRange().getValues().slice(1)
-    .filter((r) => String(r[0]).trim())
-    .map((r) => ({ ID: String(r[0]).trim() }));
+  const v = (종류 === '작업계획서' ? _계획값() : _설비값()).slice(1);
+  return v.filter((r) => String(r[0]).trim()).map((r) => ({ ID: String(r[0]).trim() }));
 }
 
 function _대상행(종류, ID) {
   if (종류 === '작업계획서') {
-    const v = _시트(SH.계획).getDataRange().getValues();
+    const v = _계획값().slice();
     const h = v.shift().map(String);
     const r = v.filter((x) => String(x[0]).trim() === ID)[0];
     return r ? _행객체(h, r) : null;
   }
-  const v = _시트(SH.설비).getDataRange().getValues();
+  const v = _설비값().slice();
   const h = v.shift().map(String);
   const i = v.findIndex((x) => String(x[0]).trim() === ID);
   if (i < 0) return null;

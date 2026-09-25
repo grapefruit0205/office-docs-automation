@@ -77,6 +77,27 @@ function _안전(이름, fn) {
   }
 }
 
+/**
+ * 구글 시트가 잠깐 멈추는 오류(`Service Spreadsheets timed out`)는 대개 일시적이라
+ * 잠깐 쉬었다 다시 부르면 지나간다. 수식을 수만 개 쓰거나 행을 지운 직후에 잘 나므로
+ * 그런 무거운 호출만 감싼다. 다시 시도해도 안 되면 그대로 던진다(원인을 숨기지 않는다).
+ */
+const 재시도문구 = /timed out|timeout|Service Spreadsheets|try again|backend error|rate limit|too many/i;
+
+function _재시도(이름, fn, 횟수) {
+  const 최대 = Math.max(Number(횟수) || 3, 1);
+  for (let i = 1; ; i++) {
+    try {
+      return fn();
+    } catch (e) {
+      const 메시지 = String((e && e.message) || e);
+      if (i >= 최대 || !재시도문구.test(메시지)) throw e;
+      _로그('[재시도 ' + i + '/' + (최대 - 1) + '] ' + 이름 + ': ' + 메시지);
+      Utilities.sleep(i * 1500);
+    }
+  }
+}
+
 function _시트(name) {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
   if (!sh) throw new Error('탭이 없습니다: ' + name + ' — 편집기에서 설치_전체를 먼저 실행하세요.');
@@ -115,14 +136,24 @@ function _행객체(h, r) {
  */
 const _설정캐시 = {};
 let _점검값캐시 = null;
+let _설비값캐시 = null;
 
 function _캐시비우기() {
   Object.keys(_설정캐시).forEach((k) => delete _설정캐시[k]);
-  _점검값캐시 = null;
+  _점검캐시비우기();
 }
 
+/** 데이터 탭(점검·설비·작업계획)을 다시 읽게 한다. 데이터를 새로 쓴 뒤 반드시 부른다 */
 function _점검캐시비우기() {
   _점검값캐시 = null;
+  _설비값캐시 = null;
+  _계획값캐시 = null;
+}
+
+/** 설비마스터 전체 값(헤더 포함). 한 실행 안에서 여러 번 읽지 않도록 담아 둔다 */
+function _설비값() {
+  if (!_설비값캐시) _설비값캐시 = _재시도('설비마스터 읽기', () => _시트(SH.설비).getDataRange().getValues());
+  return _설비값캐시;
 }
 
 /** 점검기록 전체 값(헤더 포함). 부르는 쪽에서 slice() 해서 쓴다 */
@@ -276,12 +307,12 @@ function 대장서식적용(sh, 시작행) {
     if (!c) return;
     const 수식들 = [];
     for (let r = 머리 + 1; r <= 마지막; r++) 수식들.push([_조회수식('$' + 태그열 + r, 반환열, 조회범위)]);
-    sh.getRange(머리 + 1, c, 수식들.length, 1).setFormulas(수식들);
+    _재시도(이름 + ' 조회 수식 쓰기', () => sh.getRange(머리 + 1, c, 수식들.length, 1).setFormulas(수식들));
     수식수 += 수식들.length;
   });
 
   // 2) 데이터 검증 4열
-  const 설비태그들 = _시트(SH.설비).getDataRange().getValues().slice(1)
+  const 설비태그들 = _설비값().slice(1)
     .map((r) => String(r[0]).trim()).filter((v) => v);
   let 검증수 = 0;
   if (_검증목록(sh, 머리, '설비태그', 설비태그들)) 검증수++;
@@ -304,12 +335,12 @@ function 대장서식적용(sh, 시작행) {
     SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('상')
       .setBackground('#fce5cd').setRanges([범위('심각도')]).build(),
   ];
-  sh.setConditionalFormatRules(규칙);
+  _재시도('조건부 서식', () => sh.setConditionalFormatRules(규칙));
 
   // 4) 날짜 열 표시 형식 — 엑셀이나 뷰어 로케일에 따라 8/29/2026 처럼 보이는 것을 막는다
   _안전('날짜 형식', () => {
     const 날짜열 = h.indexOf('점검일') + 1;
-    if (날짜열) sh.getRange(머리 + 1, 날짜열, 데이터수, 1).setNumberFormat('yyyy-mm-dd');
+    if (날짜열) _재시도('날짜 형식', () => sh.getRange(머리 + 1, 날짜열, 데이터수, 1).setNumberFormat('yyyy-mm-dd'));
   });
 
   // 5) 틀 고정·필터·열 너비 (A4 가로 1페이지 폭에 들어가게)
@@ -355,7 +386,7 @@ function 요약갱신() {
   const 측정열 = _열문자(h.indexOf('측정값') + 1);
 
   // 요약_설비별 — 설비 20행 × 항목 9열
-  const 설비들 = _시트(SH.설비).getDataRange().getValues().slice(1).filter((r) => String(r[0]).trim());
+  const 설비들 = _설비값().slice(1).filter((r) => String(r[0]).trim());
   const 설비탭 = _시트(SH.요약설비);
   const 설비행들 = 설비들.map((r, i) => {
     const 행 = i + 2;
@@ -374,7 +405,7 @@ function 요약갱신() {
     return 값;
   });
   if (설비행들.length) {
-    설비탭.getRange(2, 1, 설비행들.length, 설비행들[0].length).setValues(설비행들);
+    _재시도('요약_설비별 쓰기', () => 설비탭.getRange(2, 1, 설비행들.length, 설비행들[0].length).setValues(설비행들));
     // 이상합계 색 눈금 (구글시트·엑셀 모두 지원)
     _안전('색 눈금', () => {
       설비탭.setConditionalFormatRules([
@@ -400,7 +431,7 @@ function 요약갱신() {
         ',' + SH.점검 + '!$' + 판정열 + '$2:$' + 판정열 + '$' + 마지막 + ',"이상"),"yyyy-mm-dd"),"—")',
     ];
   });
-  항목탭.getRange(2, 1, 항목행들.length, 항목행들[0].length).setValues(항목행들);
+  _재시도('요약_항목별 쓰기', () => 항목탭.getRange(2, 1, 항목행들.length, 항목행들[0].length).setValues(항목행들));
 
   _로그('요약: 설비 ' + 설비행들.length + ' × 항목 ' + 항목목록.length + ' 수식, 항목별 ' + 항목행들.length + '행 (범위 $2:$' + 마지막 + ')');
 }
@@ -479,7 +510,7 @@ function _이상목록시트(ss) {
   sh.clear();
   sh.getRange(1, 1, 1, h.length).setValues([h]).setFontWeight('bold').setBackground('#C00000').setFontColor('#FFFFFF');
   if (이상.length) {
-    sh.getRange(2, 1, 이상.length, h.length).setValues(이상);
+    _재시도('이상목록 쓰기', () => sh.getRange(2, 1, 이상.length, h.length).setValues(이상));
     const N = h.indexOf('조치상태');
     if (N >= 0) {
       sh.setConditionalFormatRules([
@@ -550,7 +581,7 @@ function 대장내보내기() {
       const s = 임시.getSheetByName(n);
       if (!s || s.getLastRow() < 2) return;
       const 범위 = s.getDataRange();
-      범위.setValues(범위.getValues());
+      _재시도(n + ' 값 굳히기', () => 범위.setValues(범위.getValues()));
     });
 
     // 내보내기에 필요 없는 탭 제거
@@ -574,7 +605,7 @@ function 대장내보내기() {
     대장.getRange(2, 13, 1, 3).setValues([['', '', '']]);
     대장.setRowHeight(2, 40);
     대장.getRange(5, 1, 1, h.length).setValues([h]).setFontWeight('bold').setBackground('#1F3864').setFontColor('#FFFFFF');
-    if (값.length) 대장.getRange(6, 1, 값.length, h.length).setValues(값);
+    if (값.length) _재시도('대장 값 쓰기', () => 대장.getRange(6, 1, 값.length, h.length).setValues(값));
     대장서식적용(대장, 5);
 
     _표지시트(임시, 기간시작, 기간종료);
@@ -704,7 +735,8 @@ function 정리_발행이력중복() {
     본것[k] = 행번호;
   });
 
-  지울행.sort((a, b) => b - a).forEach((행번호) => sh.deleteRow(행번호));
+  지울행.sort((a, b) => b - a).forEach((행번호) => _재시도('발행이력 줄 삭제', () => sh.deleteRow(행번호)));
+  _안전('발행이력 정리 후 반영', () => SpreadsheetApp.flush());
   _로그('발행이력 정리: 중복 ' + (지울행.length - 빈행) + '행 / 빈 기록 ' + 빈행 + '행 삭제 → 남은 ' + (sh.getLastRow() - 1) + '건');
   return 지울행.length;
 }
@@ -1043,25 +1075,27 @@ function _종합의견(t) {
 
 /* ============================ 대상 조회 ============================ */
 
+/** 작업계획 탭 값(헤더 포함). 문서 20부를 만들 때 매번 다시 읽지 않도록 담아 둔다 */
+let _계획값캐시 = null;
+
+function _계획값() {
+  if (!_계획값캐시) _계획값캐시 = _재시도('작업계획 읽기', () => _시트(SH.계획).getDataRange().getValues());
+  return _계획값캐시;
+}
+
 function _대상목록(종류) {
-  if (종류 === '작업계획서') {
-    return _시트(SH.계획).getDataRange().getValues().slice(1)
-      .filter((r) => String(r[0]).trim())
-      .map((r) => ({ ID: String(r[0]).trim() }));
-  }
-  return _시트(SH.설비).getDataRange().getValues().slice(1)
-    .filter((r) => String(r[0]).trim())
-    .map((r) => ({ ID: String(r[0]).trim() }));
+  const v = (종류 === '작업계획서' ? _계획값() : _설비값()).slice(1);
+  return v.filter((r) => String(r[0]).trim()).map((r) => ({ ID: String(r[0]).trim() }));
 }
 
 function _대상행(종류, ID) {
   if (종류 === '작업계획서') {
-    const v = _시트(SH.계획).getDataRange().getValues();
+    const v = _계획값().slice();
     const h = v.shift().map(String);
     const r = v.filter((x) => String(x[0]).trim() === ID)[0];
     return r ? _행객체(h, r) : null;
   }
-  const v = _시트(SH.설비).getDataRange().getValues();
+  const v = _설비값().slice();
   const h = v.shift().map(String);
   const i = v.findIndex((x) => String(x[0]).trim() === ID);
   if (i < 0) return null;
@@ -1836,7 +1870,7 @@ function 설치_샘플데이터() {
       });
     });
   });
-  점검탭.getRange(2, 1, 행들.length, 행들[0].length).setValues(행들);
+  _재시도('점검기록 쓰기', () => 점검탭.getRange(2, 1, 행들.length, 행들[0].length).setValues(행들));
   _점검캐시비우기(); // 방금 쓴 데이터를 다시 읽도록
   // 집계기간을 실제 생성한 날짜로 확정한다(문서·대장의 기간과 데이터가 어긋나지 않게)
   _설정쓰기_시트(ss, '대장기간_시작', 날짜들[0]);
@@ -1865,6 +1899,7 @@ function 설치_샘플데이터() {
   });
   계획탭.getRange(2, 1, 계획행들.length, 계획행들[0].length).setValues(계획행들);
   _로그('작업계획 ' + 계획행들.length + '건 생성 (수리 5 / 예방정비 5 / 교체 4 / 청소 6)');
+  _점검캐시비우기(); // 방금 쓴 작업계획을 다시 읽도록
 
   // 4) 수식·서식·요약
   대장서식적용(점검탭, 1);
