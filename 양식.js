@@ -514,15 +514,19 @@ function _문서저장(doc, 종류, 파일명, 옵션) {
     DriveApp.getRootFolder().removeFile(파일);
   });
 
-  const pdf파일 = 출력.createFile(파일.getAs('application/pdf').setName(파일명 + '.pdf'));
+  let pdf링크 = '';
+  const pdf = _내보내기(파일, 'application/pdf', 'pdf');
+  if (pdf) pdf링크 = 출력.createFile(pdf.setName(파일명 + '.pdf')).getUrl();
+  else _로그('[주의] PDF 변환이 막혀 문서 링크만 남깁니다: ' + 파일.getUrl());
+
   let docx링크 = '';
   if (o.docx !== false) {
     _안전('docx 변환', () => {
-      const docx = 파일.getAs(MimeType.MICROSOFT_WORD).setName(파일명 + '.docx');
-      docx링크 = 출력.createFile(docx).getUrl();
+      const docx = _내보내기(파일, MimeType.MICROSOFT_WORD, 'docx');
+      if (docx) docx링크 = 출력.createFile(docx.setName(파일명 + '.docx')).getUrl();
     });
   }
-  return { 독스ID: doc.getId(), 독스링크: 파일.getUrl(), pdf: pdf파일.getUrl(), docx: docx링크, 파일명 };
+  return { 독스ID: doc.getId(), 독스링크: 파일.getUrl(), pdf: pdf링크, docx: docx링크, 파일명 };
 }
 
 /** 문서 1건 생성. 실패하면 임시 문서를 정리하고 오류를 그대로 올린다 */

@@ -471,6 +471,41 @@ function _이상목록시트(ss) {
   return sh;
 }
 
+/**
+ * 구글 파일(시트·독스)을 다른 형식 블롭으로 내보낸다.
+ * getAs 만으로는 계정·파일 상태에 따라
+ * "Converting from application/vnd.google-apps.spreadsheet to ... is not supported" 로 막힌다.
+ * 그래서 다운로드 URL(파일 > 다운로드 > Excel 과 같은 경로)까지 시도하고,
+ * 어느 경로가 쓰였는지 로그에 남긴다(실패를 조용히 삼키지 않는다).
+ */
+function _내보내기URL(파일, 형식) {
+  const m = String(파일.getMimeType());
+  const 종류 = m.indexOf('spreadsheet') >= 0 ? 'spreadsheets' : 'document';
+  return 'https://docs.google.com/' + 종류 + '/d/' + 파일.getId() + '/export?format=' + 형식;
+}
+
+function _내보내기(파일, mime, 형식) {
+  try {
+    return 파일.getAs(mime);
+  } catch (e) {
+    _로그('[건너뜀] getAs(' + 형식 + '): ' + e.message);
+  }
+  try {
+    const 응답 = UrlFetchApp.fetch(_내보내기URL(파일, 형식), {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true,
+    });
+    if (응답.getResponseCode() === 200) {
+      _로그(형식 + ' 변환: 다운로드 URL 경로 사용');
+      return 응답.getBlob();
+    }
+    _로그('[건너뜀] ' + 형식 + ' 다운로드 URL: HTTP ' + 응답.getResponseCode());
+  } catch (e2) {
+    _로그('[건너뜀] ' + 형식 + ' 다운로드 URL: ' + e2.message);
+  }
+  return null;
+}
+
 function 대장내보내기() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const 시작시각 = Date.now();
@@ -482,6 +517,7 @@ function 대장내보내기() {
   let 임시ID = null;
   let 결과 = null;
   let 데이터수 = 0;
+  let 보존 = false;
   try {
     임시ID = DriveApp.getFileById(ss.getId()).makeCopy('임시_' + 이름).getId();
     const 임시 = SpreadsheetApp.openById(임시ID);
@@ -527,12 +563,21 @@ function 대장내보내기() {
     Utilities.sleep(1500);
 
     const 파일 = DriveApp.getFileById(임시ID);
-    const xlsx = 출력.createFile(파일.getAs(MimeType.MICROSOFT_EXCEL).setName(이름 + '.xlsx'));
-    _안전('대장 PDF', () => 출력.createFile(파일.getAs('application/pdf').setName(이름 + '.pdf')));
-    결과 = xlsx.getUrl();
-    _로그('xlsx 저장: ' + 결과);
+    const xlsx = _내보내기(파일, MimeType.MICROSOFT_EXCEL, 'xlsx');
+    if (xlsx) {
+      결과 = 출력.createFile(xlsx.setName(이름 + '.xlsx')).getUrl();
+      _로그('xlsx 저장: ' + 결과);
+    } else {
+      // 변환이 막힌 계정: 임시 사본을 출력 폴더에 그대로 남긴다(대장은 대장이다)
+      출력.addFile(파일);
+      보존 = true;
+      결과 = 파일.getUrl();
+      _로그('[대체] 엑셀 변환이 막혀 구글시트 사본으로 저장했습니다: ' + 결과);
+    }
+    const pdf = _내보내기(파일, 'application/pdf', 'pdf');
+    if (pdf) _안전('대장 PDF', () => 출력.createFile(pdf.setName(이름 + '.pdf')));
   } finally {
-    if (임시ID) _안전('임시본 정리', () => DriveApp.getFileById(임시ID).setTrashed(true));
+    if (임시ID && !보존) _안전('임시본 정리', () => DriveApp.getFileById(임시ID).setTrashed(true));
   }
 
   _측정로그('자동', '점검대장 내보내기', 데이터수, (Date.now() - 시작시각) / 1000, '자동', 이름 + '.xlsx');
