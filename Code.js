@@ -620,6 +620,10 @@ function _측정로그(구분, 작업, 건수, 소요초, 방식, 비고) {
  * 문서 링크(구글독스ID·PDF링크)가 지워지면 어떤 문서가 문제인지 추적할 수 없다.
  */
 function _발행이력기록(종류, 대상ID, o) {
+  if (!종류 || !대상ID) {
+    _로그('[건너뜀] 발행이력: 문서종류나 대상ID가 비어 있어 기록하지 않습니다 (' + 종류 + ' / ' + 대상ID + ')');
+    return;
+  }
   const sh = _시트(SH.발행);
   const h = _헤더(sh);
   // 짧은 이름으로 넘겨도 헤더 이름으로 맞춰 준다
@@ -652,6 +656,45 @@ function _발행이력기록(종류, 대상ID, o) {
 
   if (행번호) sh.getRange(행번호, 1, 1, h.length).setValues([행]);
   else sh.appendRow(행);
+}
+
+/**
+ * 발행이력의 중복·빈 행을 정리한다.
+ * 같은 (문서종류, 대상ID)가 여러 줄이면 마지막 줄만 남긴다
+ * (예전 실행에서 문서종류가 빈 채로 만들어진 기록이 섞이면 검증 건수가 부풀려진다).
+ * 문서 파일 자체는 건드리지 않는다 — 장부만 정리한다.
+ */
+function 정리_발행이력중복() {
+  const sh = _시트(SH.발행);
+  if (sh.getLastRow() < 2) {
+    _로그('발행이력: 정리할 기록이 없습니다');
+    return 0;
+  }
+  const v = sh.getDataRange().getValues();
+  const h = v.shift().map(String);
+  const i종 = h.indexOf('문서종류');
+  const iID = h.indexOf('대상ID');
+  const 본것 = {};
+  const 지울행 = [];
+  let 빈행 = 0;
+
+  v.forEach((r, i) => {
+    const 종 = String(r[i종]).trim();
+    const id = String(r[iID]).trim();
+    const 행번호 = i + 2;
+    if (!종 || !id) {
+      빈행++;
+      지울행.push(행번호);
+      return;
+    }
+    const k = 종 + '|' + id;
+    if (k in 본것) 지울행.push(본것[k]); // 앞선 줄을 지우고 최신 줄을 남긴다
+    본것[k] = 행번호;
+  });
+
+  지울행.sort((a, b) => b - a).forEach((행번호) => sh.deleteRow(행번호));
+  _로그('발행이력 정리: 중복 ' + (지울행.length - 빈행) + '행 / 빈 기록 ' + 빈행 + '행 삭제 → 남은 ' + (sh.getLastRow() - 1) + '건');
+  return 지울행.length;
 }
 
 function _발행이력완료행(종류) {
