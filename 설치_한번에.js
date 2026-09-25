@@ -354,7 +354,12 @@ function 대장서식적용(sh, 시작행) {
     const i = h.indexOf(이름);
     if (i >= 0) sh.setColumnWidth(i + 1, 너비[이름]);
   });
-  _안전('필터', () => sh.getRange(머리, 1, 데이터수 + 1, h.length).createFilter());
+  // 이미 필터가 있으면 createFilter 가 거부된다 → 지우고 다시 만든다(두 번 돌려도 같은 상태가 되도록)
+  _안전('필터', () => {
+    const 기존 = sh.getFilter();
+    if (기존) 기존.remove();
+    _재시도('필터', () => sh.getRange(머리, 1, 데이터수 + 1, h.length).createFilter());
+  });
 
   _로그('대장 서식: 수식 ' + 수식수 + '개 / 검증 ' + 검증수 + '열 / 조건부 서식 ' + 규칙.length + '규칙 / 틀 고정 ' + 머리 + '행 3열');
 }
